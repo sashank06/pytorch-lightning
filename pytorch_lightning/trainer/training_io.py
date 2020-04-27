@@ -5,7 +5,7 @@ Lightning can automate saving and loading checkpoints
 Checkpointing is enabled by default to the current working directory.
 To change the checkpoint path pass in::
 
-    Trainer(default_save_path='/your/path/to/save/checkpoints')
+    Trainer(default_root_dir='/your/path/to/save/checkpoints')
 
 
 To modify the behavior of checkpointing pass in your own callback.
@@ -17,7 +17,7 @@ To modify the behavior of checkpointing pass in your own callback.
     # DEFAULTS used by the Trainer
     checkpoint_callback = ModelCheckpoint(
         filepath=os.getcwd(),
-        save_best_only=True,
+        save_top_k=1,
         verbose=True,
         monitor='val_loss',
         mode='min',
@@ -39,15 +39,9 @@ Lightning will restore the session if you pass a logger with the same version an
 .. code-block:: python
 
     from pytorch_lightning import Trainer
-    from pytorch_lightning.loggers import TestTubeLogger
 
-    logger = TestTubeLogger(
-        save_dir='./savepath',
-        version=1  # An existing version with a saved checkpoint
-    )
     trainer = Trainer(
-        logger=logger,
-        default_save_path='./savepath'
+        resume_from_checkpoint=PATH
     )
 
     # this fit call loads model weights and trainer state
@@ -82,61 +76,63 @@ At a rough level, here's what happens inside Trainer :py:mod:`pytorch_lightning.
     # restore the lr schedulers
     lr_schedulers = checkpoint['lr_schedulers']
     for scheduler, lrs_state in zip(self.lr_schedulers, lr_schedulers):
-        scheduler.load_state_dict(lrs_state)
+        scheduler['scheduler'].load_state_dict(lrs_state)
 
     # uses the model you passed into trainer
     model.load_state_dict(checkpoint['state_dict'])
 
 """
 
-import logging as log
 import os
 import re
 import signal
-import warnings
 from abc import ABC
-from subprocess import call
 from argparse import Namespace
+from subprocess import call
+from typing import Union
 
 import torch
-import torch.distributed as dist
+import torch.distributed as torch_distrib
 
+from pytorch_lightning import _logger as log
+from pytorch_lightning.core.lightning import LightningModule
+from pytorch_lightning.loggers import LightningLoggerBase
 from pytorch_lightning.overrides.data_parallel import (
     LightningDistributedDataParallel,
     LightningDataParallel,
 )
+from pytorch_lightning.utilities import rank_zero_warn, parsing
 
 try:
     import torch_xla
     import torch_xla.core.xla_model as xm
     import torch_xla.distributed.xla_multiprocessing as xmp
-
-    XLA_AVAILABLE = True
 except ImportError:
     XLA_AVAILABLE = False
+else:
+    XLA_AVAILABLE = True
 
 
 class TrainerIOMixin(ABC):
 
-    def __init__(self):
-        # this is just a summary on variables used in this abstract class,
-        #  the proper values/initialisation should be done in child class
-        self.model = None
-        self.on_gpu = None
-        self.root_gpu = None
-        self.resume_from_checkpoint = None
-        self.use_ddp = None
-        self.use_ddp2 = None
-        self.checkpoint_callback = None
-        self.proc_rank = None
-        self.weights_save_path = None
-        self.logger = None
-        self.early_stop_callback = None
-        self.lr_schedulers = None
-        self.optimizers = None
-        self.on_tpu = None
-        self.num_training_batches = None
-        self.accumulate_grad_batches = None
+    # this is just a summary on variables used in this abstract class,
+    #  the proper values/initialisation should be done in child class
+    model: LightningModule
+    on_gpu: bool
+    root_gpu: ...
+    resume_from_checkpoint: ...
+    use_ddp: bool
+    use_ddp2: bool
+    checkpoint_callback: ...
+    proc_rank: int
+    weights_save_path: str
+    logger: Union[LightningLoggerBase, bool]
+    early_stop_callback: ...
+    lr_schedulers: ...
+    optimizers: ...
+    on_tpu: bool
+    num_training_batches: int
+    accumulate_grad_batches: int
 
     def get_model(self):
         is_dp_module = isinstance(self.model, (LightningDistributedDataParallel,
@@ -147,15 +143,12 @@ class TrainerIOMixin(ABC):
     # --------------------
     # CHECK-POINTING
     # --------------------
-    def restore_weights(self, model):
+    def restore_weights(self, model: LightningModule):
         """
-        To restore weights we have two cases.
-        First, attempt to restore hpc weights. If successful, don't restore
-        other weights.
-
-        Otherwise, try to restore actual weights
-        :param model:
-        :return:
+        We attempt to restore weights in this order:
+        1. HPC weights.
+        2. if no HPC weights restore checkpoint_path weights
+        3. otherwise don't restore weights
         """
         # clear cache before restore
         if self.on_gpu:
@@ -171,14 +164,11 @@ class TrainerIOMixin(ABC):
         if not did_restore_hpc_weights:
             if self.resume_from_checkpoint is not None:
                 self.restore(self.resume_from_checkpoint, on_gpu=self.on_gpu)
-            else:
-                # restore weights if same exp version
-                self.restore_state_if_checkpoint_exists(model)
 
         # wait for all models to restore weights
         if self.use_ddp or self.use_ddp2:
             # wait for all processes to catch up
-            dist.barrier()
+            torch_distrib.barrier()
 
         # wait for all models to restore weights
         if self.on_tpu and XLA_AVAILABLE:
@@ -188,42 +178,6 @@ class TrainerIOMixin(ABC):
         # clear cache after restore
         if self.on_gpu:
             torch.cuda.empty_cache()
-
-    def restore_state_if_checkpoint_exists(self, model):
-        did_restore = False
-
-        # do nothing if there's not dir or callback
-        no_ckpt_callback = (self.checkpoint_callback is None) or (not self.checkpoint_callback)
-        if no_ckpt_callback or not os.path.exists(self.checkpoint_callback.filepath):
-            return did_restore
-
-        # restore trainer state and model if there is a weight for this experiment
-        last_epoch = -1
-        last_ckpt_name = None
-
-        # find last epoch
-        checkpoints = os.listdir(self.checkpoint_callback.filepath)
-        for name in checkpoints:
-            # ignore hpc ckpts
-            if 'hpc_' in name:
-                continue
-
-            if '.ckpt' in name:
-                epoch = name.split('epoch_')[1]
-                epoch = int(re.sub('[^0-9]', '', epoch))
-
-                if epoch > last_epoch:
-                    last_epoch = epoch
-                    last_ckpt_name = name
-
-        # restore last checkpoint
-        if last_ckpt_name is not None:
-            last_ckpt_path = os.path.join(self.checkpoint_callback.filepath, last_ckpt_name)
-            self.restore(last_ckpt_path, self.on_gpu)
-            log.info(f'Model and Trainer restored from checkpoint: {last_ckpt_path}')
-            did_restore = True
-
-        return did_restore
 
     # --------------------
     # HPC SIGNAL HANDLING
@@ -243,7 +197,7 @@ class TrainerIOMixin(ABC):
             signal.signal(signal.SIGUSR1, self.sig_handler)
             signal.signal(signal.SIGTERM, self.term_handler)
 
-    def sig_handler(self, signum, frame):
+    def sig_handler(self, signum, frame):  # pragma: no-cover
         if self.proc_rank == 0:
             # save weights
             log.info('handling SIGUSR1')
@@ -273,17 +227,17 @@ class TrainerIOMixin(ABC):
     # --------------------
     # MODEL SAVE CHECKPOINT
     # --------------------
-    def _atomic_save(self, checkpoint, filepath):
+    def _atomic_save(self, checkpoint, filepath: str):
         """Saves a checkpoint atomically, avoiding the creation of incomplete checkpoints.
 
         This will create a temporary checkpoint with a suffix of ``.part``, then copy it to the final location once
         saving is finished.
 
         Args:
-            checkpoint (object): The object to save.
+            checkpoint: The object to save.
                 Built to be used with the ``dump_checkpoint`` method, but can deal with anything which ``torch.save``
                 accepts.
-            filepath (str|pathlib.Path): The path to which the checkpoint will be saved.
+            filepath: The path to which the checkpoint will be saved.
                 This points to the file that the checkpoint will be stored in.
         """
         tmp_path = str(filepath) + ".part"
@@ -293,16 +247,25 @@ class TrainerIOMixin(ABC):
     def save_checkpoint(self, filepath):
         checkpoint = self.dump_checkpoint()
 
-        # do the actual save
-        try:
-            self._atomic_save(checkpoint, filepath)
-        except AttributeError:
-            if 'hparams' in checkpoint:
-                del checkpoint['hparams']
+        if self.proc_rank == 0:
+            # do the actual save
+            try:
+                self._atomic_save(checkpoint, filepath)
+            except AttributeError:
+                if 'hparams' in checkpoint:
+                    del checkpoint['hparams']
 
-            self._atomic_save(checkpoint, filepath)
+                self._atomic_save(checkpoint, filepath)
 
-    def restore(self, checkpoint_path, on_gpu):
+    def restore(self, checkpoint_path: str, on_gpu: bool):
+        """
+        Restore training state from checkpoint.
+        Also restores all training state like:
+        - epoch
+        - callbacks
+        - schedulers
+        - optimizer
+        """
 
         # if on_gpu:
         #     checkpoint = torch.load(checkpoint_path)
@@ -317,6 +280,10 @@ class TrainerIOMixin(ABC):
         model.load_state_dict(checkpoint['state_dict'])
         if on_gpu:
             model.cuda(self.root_gpu)
+
+        # restore amp scaling
+        if self.use_amp and self.use_native_amp and 'native_amp_scaling_state' in checkpoint:
+            self.scaler.load_state_dict(checkpoint['native_amp_scaling_state'])
 
         # load training state (affects trainer only)
         self.restore_training_state(checkpoint)
@@ -343,20 +310,28 @@ class TrainerIOMixin(ABC):
 
         # save lr schedulers
         lr_schedulers = []
-        for i, scheduler in enumerate(self.lr_schedulers):
-            lr_schedulers.append(scheduler.state_dict())
+        for scheduler in self.lr_schedulers:
+            lr_schedulers.append(scheduler['scheduler'].state_dict())
 
         checkpoint['lr_schedulers'] = lr_schedulers
 
         # add the hparams and state_dict from the model
         model = self.get_model()
+
         checkpoint['state_dict'] = model.state_dict()
+
+        # restore native amp scaling
+        if self.use_amp and self.use_native_amp and 'native_amp_scaling_state' in checkpoint:
+            checkpoint['native_amp_scaling_state'] = self.scaler.state_dict()
+
         if hasattr(model, "hparams"):
-            checkpoint['hparams'] = vars(model.hparams)
+            parsing.clean_namespace(model.hparams)
+            is_namespace = isinstance(model.hparams, Namespace)
+            checkpoint['hparams'] = vars(model.hparams) if is_namespace else model.hparams
+            checkpoint['hparams_type'] = 'namespace' if is_namespace else 'dict'
         else:
-            warnings.warn(
-                "Did not find hyperparameters at model.hparams. Saving checkpoint without"
-                " hyperparameters"
+            rank_zero_warn(
+                "Did not find hyperparameters at model hparams. Saving checkpoint without hyperparameters."
             )
 
         # give the model a chance to add a few things
@@ -367,12 +342,8 @@ class TrainerIOMixin(ABC):
     # --------------------
     # HPC IO
     # --------------------
-    def restore_hpc_weights_if_needed(self, model):
-        """
-        If there is a set of hpc weights, use as signal to restore model
-        :param model:
-        :return:
-        """
+    def restore_hpc_weights_if_needed(self, model: LightningModule):
+        """If there is a set of hpc weights, use as signal to restore model."""
         did_restore = False
 
         # look for hpc weights
@@ -409,7 +380,7 @@ class TrainerIOMixin(ABC):
         n_accum = 1 if self.accumulate_grad_batches is None else self.accumulate_grad_batches
         expected_steps = self.num_training_batches / n_accum
         if self.num_training_batches != 0 and self.global_step % expected_steps > 1:
-            warnings.warn(
+            rank_zero_warn(
                 "You're resuming from a checkpoint that ended mid-epoch. "
                 "This can cause unreliable results if further training is done, "
                 "consider using an end of epoch checkpoint. "
@@ -431,12 +402,12 @@ class TrainerIOMixin(ABC):
         # restore the lr schedulers
         lr_schedulers = checkpoint['lr_schedulers']
         for scheduler, lrs_state in zip(self.lr_schedulers, lr_schedulers):
-            scheduler.load_state_dict(lrs_state)
+            scheduler['scheduler'].load_state_dict(lrs_state)
 
     # ----------------------------------
     # PRIVATE OPS
     # ----------------------------------
-    def hpc_save(self, folderpath, logger):
+    def hpc_save(self, folderpath: str, logger):
         # make sure the checkpoint folder exists
         os.makedirs(folderpath, exist_ok=True)
 
@@ -447,7 +418,7 @@ class TrainerIOMixin(ABC):
 
         if not os.path.exists(folderpath):
             os.makedirs(folderpath, exist_ok=True)
-        filepath = '{}/hpc_ckpt_{}.ckpt'.format(folderpath, ckpt_number)
+        filepath = os.path.join(folderpath, f'hpc_ckpt_{ckpt_number}.ckpt')
 
         # give model a chance to do something on hpc_save
         model = self.get_model()
@@ -478,6 +449,10 @@ class TrainerIOMixin(ABC):
 
         # load the state_dict on the model automatically
         model.load_state_dict(checkpoint['state_dict'])
+
+        # restore amp scaling
+        if self.use_amp and self.use_native_amp and 'native_amp_scaling_state' in checkpoint:
+            self.scaler.load_state_dict(checkpoint['native_amp_scaling_state'])
 
         if self.root_gpu is not None:
             model.cuda(self.root_gpu)

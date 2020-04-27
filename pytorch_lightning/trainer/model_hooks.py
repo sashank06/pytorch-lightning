@@ -11,13 +11,28 @@ class TrainerModelHooksMixin(ABC):
         f_op = getattr(model, f_name, None)
         return callable(f_op)
 
-    def is_overriden(self, f_name, model=None):
+    def is_overriden(self, method_name: str, model: LightningModule = None) -> bool:
         if model is None:
             model = self.get_model()
         super_object = LightningModule
 
-        # when code pointers are different, it was overriden
-        is_overriden = getattr(model, f_name).__code__ is not getattr(super_object, f_name).__code__
+        if not hasattr(model, method_name):
+            # in case of calling deprecated method
+            return False
+
+        instance_attr = getattr(model, method_name)
+        if not instance_attr:
+            return False
+        super_attr = getattr(super_object, method_name)
+
+        # when code pointers are different, it was implemented
+        if hasattr(instance_attr, 'patch_loader_code'):
+            # cannot pickle __code__ so cannot verify if PatchDataloader
+            # exists which shows dataloader methods have been overwritten.
+            # so, we hack it by using the string representation
+            is_overriden = instance_attr.patch_loader_code != str(super_attr.__code__)
+        else:
+            is_overriden = instance_attr.__code__ is not super_attr.__code__
         return is_overriden
 
     def has_arg(self, f_name, arg_name):
@@ -27,5 +42,4 @@ class TrainerModelHooksMixin(ABC):
 
     @abstractmethod
     def get_model(self):
-        # this is just empty shell for code from other class
-        pass
+        """Warning: this is just empty shell for code implemented in other class."""

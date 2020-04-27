@@ -13,11 +13,31 @@ Every optimizer you use can be paired with any `LearningRateScheduler <https://p
 
    # Adam + LR scheduler
    def configure_optimizers(self):
-      return [Adam(...)], [ReduceLROnPlateau()]
+      optimizer = Adam(...)
+      scheduler = ReduceLROnPlateau(optimizer, ...)
+      return [optimizer], [scheduler]
 
    # Two optimziers each with a scheduler
    def configure_optimizers(self):
-      return [Adam(...), SGD(...)], [ReduceLROnPlateau(), LambdaLR()]
+      optimizer1 = Adam(...)
+      optimizer2 = SGD(...)
+      scheduler1 = ReduceLROnPlateau(optimizer1, ...)
+      scheduler2 = LambdaLR(optimizer2, ...)
+      return [optimizer1, optimizer2], [scheduler1, scheduler2]
+
+   # Same as above with additional params passed to the first scheduler
+   def configure_optimizers(self):
+      optimizers = [Adam(...), SGD(...)]
+      schedulers = [
+         {
+            'scheduler': ReduceLROnPlateau(optimizers[0], ...),
+            'monitor': 'val_recall', # Default: val_loss
+            'interval': 'epoch',
+            'frequency': 1
+         },
+         LambdaLR(optimizers[1], ...)
+      ]
+      return optimizers, schedulers
 
 
 Use multiple optimizers (like GANs)
@@ -53,9 +73,9 @@ Lightning will call each optimizer sequentially:
 
 
 Step optimizers at arbitrary intervals
--------------------------------------
+----------------------------------------
 To do more interesting things with your optimizers such as learning rate warm-up or odd scheduling,
-override the :meth:`optimizer_step' function.
+override the :meth:`optimizer_step` function.
 
 For example, here step optimizer A every 2 batches and optimizer B every 4 batches
 

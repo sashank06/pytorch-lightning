@@ -3,7 +3,7 @@ graft wheelhouse
 
 recursive-exclude __pycache__  *.py[cod] *.orig
 
-# Include the README
+# Include the README and CHANGELOG
 include *.md
 
 # Include the license file
@@ -25,7 +25,8 @@ exclude tests
 # Exclude the documentation files
 recursive-exclude docs *
 exclude docs
-recursive-include docs/source/_static/images/ lightning_logo* pl_overview* tf_*
+recursive-include docs/source/_images/logos/ *
+recursive-include docs/source/_images/general/ pl_overview* tf_*
 
 # Include the Requirements
 include requirements.txt
@@ -40,3 +41,6 @@ prune .circleci
 prune notebook*
 prune temp*
 prune test*
+prune benchmark*
+prune docker
+

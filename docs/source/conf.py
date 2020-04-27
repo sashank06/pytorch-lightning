@@ -66,14 +66,14 @@ release = pytorch_lightning.__version__
 
 # If your documentation needs a minimal Sphinx version, state it here.
 
-needs_sphinx = '1.4'
+needs_sphinx = '2.0'
 
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
 extensions = [
     'sphinx.ext.autodoc',
-    'sphinxcontrib.mockautodoc',
+    # 'sphinxcontrib.mockautodoc',  # raises error: directive 'automodule' is already registered ...
     # 'sphinxcontrib.fulltoc',  # breaks pytorch-theme with unexpected kw argument 'titles_only'
     'sphinx.ext.doctest',
     'sphinx.ext.intersphinx',
@@ -87,6 +87,7 @@ extensions = [
     # 'm2r',
     'nbsphinx',
     'sphinx_autodoc_typehints',
+    'sphinx_paramlinks',
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -125,7 +126,20 @@ language = None
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns = ['*.test_*']
+exclude_patterns = [
+    'pytorch_lightning.rst',
+    'pl_examples.*',
+    'modules.rst',
+
+    # deprecated/renamed:
+    'pytorch_lightning.loggers.comet_logger.rst',           # TODO: remove in v0.8.0
+    'pytorch_lightning.loggers.mlflow_logger.rst',          # TODO: remove in v0.8.0
+    'pytorch_lightning.loggers.test_tube_logger.rst',       # TODO: remove in v0.8.0
+    'pytorch_lightning.callbacks.pt_callbacks.*',           # TODO: remove in v0.8.0
+    'pytorch_lightning.pt_overrides.*',                     # TODO: remove in v0.8.0
+    'pytorch_lightning.root_module.*',                      # TODO: remove in v0.8.0
+    'pytorch_lightning.logging.*',                          # TODO: remove in v0.8.0
+]
 
 # The name of the Pygments (syntax highlighting) style to use.
 pygments_style = None
@@ -152,12 +166,12 @@ html_theme_options = {
     'logo_only': False,
 }
 
-html_logo = '_static/images/lightning_logo-name.svg'
+html_logo = '_images/logos/lightning_logo-name.svg'
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-html_static_path = ['_static']
+html_static_path = ['_images', '_templates']
 
 # Custom sidebar templates, must be a dictionary that maps document names
 # to template names.
@@ -237,8 +251,12 @@ epub_exclude_files = ['search.html']
 
 # -- Options for intersphinx extension ---------------------------------------
 
-# Example configuration for intersphinx: refer to the Python standard library.
-intersphinx_mapping = {'https://docs.python.org/': None}
+intersphinx_mapping = {
+    'python': ('https://docs.python.org/3', None),
+    'torch': ('https://pytorch.org/docs/stable/', None),
+    'numpy': ('https://docs.scipy.org/doc/numpy/', None),
+    'PIL': ('https://pillow.readthedocs.io/en/stable/', None),
+}
 
 # -- Options for todo extension ----------------------------------------------
 
@@ -297,7 +315,17 @@ with open(os.path.join(PATH_ROOT, 'requirements.txt'), 'r') as fp:
             MOCK_REQUIRE_PACKAGES.append(pkg.rstrip())
 
 # TODO: better parse from package since the import name and package name may differ
-MOCK_MANUAL_PACKAGES = ['torch', 'torchvision', 'test_tube', 'mlflow', 'comet_ml', 'wandb', 'neptune']
+MOCK_MANUAL_PACKAGES = [
+    'torch',
+    'torchvision',
+    'PIL',
+    'test_tube',
+    'mlflow',
+    'comet_ml',
+    'wandb',
+    'neptune',
+    'trains',
+]
 autodoc_mock_imports = MOCK_REQUIRE_PACKAGES + MOCK_MANUAL_PACKAGES
 # for mod_name in MOCK_REQUIRE_PACKAGES:
 #     sys.modules[mod_name] = mock.Mock()
@@ -354,11 +382,13 @@ autoclass_content = 'both'
 #  see https://github.com/sphinx-doc/sphinx/issues/5459
 autodoc_default_options = {
     'members': None,
+    'methods': None,
+    # 'attributes': None,
     'special-members': '__call__',
-    'undoc-members': True,
-    # 'exclude-members': '__weakref__',
+    'exclude-members': '_abc_impl',
     'show-inheritance': True,
     'private-members': True,
+    'noindex': True,
 }
 
 # Sphinx will add “permalinks” for each heading and description environment as paragraph signs that
@@ -366,7 +396,7 @@ autodoc_default_options = {
 # This value determines the text for the permalink; it defaults to "¶". Set it to None or the empty
 #  string to disable permalinks.
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#confval-html_add_permalinks
-html_add_permalinks = True
+html_add_permalinks = "¶"
 
 # True to prefix each section label with the name of the document it is in, followed by a colon.
 #  For example, index:Introduction for a section called Introduction that appears in document index.rst.

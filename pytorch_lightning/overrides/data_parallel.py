@@ -8,7 +8,7 @@ from torch.nn import DataParallel
 from torch.nn.parallel import DistributedDataParallel
 
 
-def _find_tensors(obj):  # pragma: no cover
+def _find_tensors(obj):  # pragma: no-cover
     r"""
     Recursively find all tensors contained in the specified object.
     """
@@ -21,7 +21,7 @@ def _find_tensors(obj):  # pragma: no cover
     return []
 
 
-def get_a_var(obj):  # pragma: no cover
+def get_a_var(obj):  # pragma: no-cover
     if isinstance(obj, torch.Tensor):
         return obj
 
@@ -77,7 +77,7 @@ class LightningDistributedDataParallel(DistributedDataParallel):
     def parallel_apply(self, replicas, inputs, kwargs):
         return parallel_apply(replicas, inputs, kwargs, self.device_ids[:len(replicas)])
 
-    def forward(self, *inputs, **kwargs):  # pragma: no cover
+    def forward(self, *inputs, **kwargs):  # pragma: no-cover
         self._sync_params()
         if self.device_ids:
             inputs, kwargs = self.scatter(inputs, kwargs, self.device_ids)
@@ -99,7 +99,14 @@ class LightningDistributedDataParallel(DistributedDataParallel):
                 output = self.gather(outputs, self.output_device)
         else:
             # normal
-            output = self.module(*inputs, **kwargs)
+            # output = self.module(*inputs, **kwargs)
+            # lightning (ddp_cpu)
+            if self.module.training:
+                output = self.module.training_step(*inputs, **kwargs)
+            elif self.module.testing:
+                output = self.module.test_step(*inputs, **kwargs)
+            else:
+                output = self.module.validation_step(*inputs, **kwargs)
 
         if torch.is_grad_enabled():
             # We'll return the output object verbatim since it is a freeform
@@ -114,7 +121,7 @@ class LightningDistributedDataParallel(DistributedDataParallel):
         return output
 
 
-def parallel_apply(modules, inputs, kwargs_tup=None, devices=None):  # pragma: no cover
+def parallel_apply(modules, inputs, kwargs_tup=None, devices=None):  # pragma: no-cover
     r"""Applies each `module` in :attr:`modules` in parallel on arguments
     contained in :attr:`inputs` (positional) and :attr:`kwargs_tup` (keyword)
     on each of :attr:`devices`.
@@ -163,6 +170,9 @@ def parallel_apply(modules, inputs, kwargs_tup=None, devices=None):  # pragma: n
 
                 else:
                     output = module.validation_step(*input, **kwargs)
+
+                if module.use_dp or module.use_ddp2:
+                    auto_squeeze_dim_zeros(output)
                 # ---------------
 
             with lock:
@@ -199,3 +209,18 @@ def parallel_apply(modules, inputs, kwargs_tup=None, devices=None):  # pragma: n
             raise output
         outputs.append(output)
     return outputs
+
+
+def auto_squeeze_dim_zeros(output):
+    """
+    In DP or DDP2 we need to unsqueeze dim 0
+    :param output:
+    :return:
+    """
+    for k, v in output.items():
+        if not isinstance(v, torch.Tensor):
+            continue
+
+        is_scalar = v.dim() == 0
+        if is_scalar:
+            output[k] = output[k].unsqueeze(0)

@@ -3,8 +3,8 @@ Template model definition
 -------------------------
 
 In 99% of cases you want to just copy `one of the examples
- <https://github.com/PyTorchLightning/pytorch-lightning/tree/master/pl_examples>`_
- to start a new lightningModule and change the core of what your model is actually trying to do.
+<https://github.com/PyTorchLightning/pytorch-lightning/tree/master/pl_examples>`_
+to start a new lightningModule and change the core of what your model is actually trying to do.
 
 .. code-block:: bash
 
@@ -140,7 +140,7 @@ Hyperparameter search on a SLURM HPC cluster
 
 """
 
-from .basic_examples.lightning_module_template import LightningTemplateModel
+from pl_examples.models.lightning_template import LightningTemplateModel
 
 __all__ = [
     'LightningTemplateModel'
