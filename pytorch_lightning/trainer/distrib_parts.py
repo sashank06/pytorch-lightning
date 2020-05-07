@@ -461,10 +461,15 @@ class TrainerDPMixin(ABC):
 
         # when tuple
         if isinstance(batch, tuple):
-            batch = list(batch)
-            for i, x in enumerate(batch):
-                batch[i] = self.__transfer_data_to_device(x, device, gpu_id)
-            return tuple(batch)
+            # when namedtuple
+            if hasattr(batch, '_fields'):
+                elem_type = type(batch)
+                return elem_type(*(self.__transfer_data_to_device(x, device, gpu_id) for x in batch))
+            else:
+                batch = list(batch)
+                for i, x in enumerate(batch):
+                    batch[i] = self.__transfer_data_to_device(x, device, gpu_id)
+                return tuple(batch)
 
         # when dict
         if isinstance(batch, dict):
@@ -565,16 +570,15 @@ class TrainerDPMixin(ABC):
         model.forward = model_autocast_original_forward
 
     def horovod_train(self, model):
-        # Horovod: initialize library
-        hvd.init()
-
         if torch.cuda.is_available() and self.on_gpu:
             # Horovod: pin GPU to local rank
-            torch.cuda.set_device(hvd.local_rank())
-            model.cuda(hvd.local_rank())
+            assert self.root_gpu == hvd.local_rank()
+            torch.cuda.set_device(self.root_gpu)
+            model.cuda(self.root_gpu)
 
-        # Only show progress bar from the first worker
-        self.progress_bar_refresh_rate = self.progress_bar_refresh_rate if hvd.rank() == 0 else 0
+        # avoid duplicating progress bar
+        if hvd.rank() != 0 and self.progress_bar_callback is not None:
+            self.progress_bar_callback.disable()
 
         # CHOOSE OPTIMIZER
         # allow for lr schedulers as well
